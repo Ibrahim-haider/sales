@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import io
-import json
 import re
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -11,262 +11,332 @@ import plotly.express as px
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder
 
-st.set_page_config(page_title="Universal Excel Analytics", page_icon="📊", layout="wide")
+st.set_page_config(
+    page_title="Automatic Excel Analysis",
+    page_icon="📊",
+    layout="wide",
+)
 
 st.markdown("""
 <style>
-.block-container{padding-top:1rem}
-.hero{padding:22px 24px;border-radius:18px;background:linear-gradient(135deg,#10284d,#2563eb);color:white;margin-bottom:18px}
-.hero h1{margin:0 0 6px}.hero p{margin:0;opacity:.9}
+.block-container {padding-top:1rem; padding-bottom:2rem;}
+.hero {
+  padding:22px 24px;
+  border-radius:18px;
+  background:linear-gradient(135deg,#10284d,#2563eb);
+  color:white;
+  margin-bottom:18px;
+}
+.hero h1 {margin:0 0 6px;}
+.hero p {margin:0; opacity:.9;}
+[data-testid="stMetric"] {
+  background:white;
+  border:1px solid #dce4ef;
+  border-radius:14px;
+  padding:14px;
+}
+.section {
+  background:#1f3d6d;
+  color:white;
+  padding:8px 12px;
+  border-radius:7px;
+  font-weight:700;
+  margin:16px 0 12px;
+}
+.insight {
+  background:white;
+  border-left:4px solid #2563eb;
+  padding:10px 13px;
+  margin:7px 0;
+  border-radius:7px;
+}
 </style>
-<div class="hero"><h1>Universal Excel Analytics</h1>
-<p>Upload, map, filter, clean, calculate, analyse, visualize and export structured business data.</p></div>
+
+<div class="hero">
+  <h1>Automatic Excel Analysis</h1>
+  <p>Upload a structured Excel or CSV file. The system automatically profiles the data, calculates key metrics, creates charts, and highlights important findings.</p>
+</div>
 """, unsafe_allow_html=True)
 
-ALIASES = {
-    "branch":["branch","branch name","store","outlet","location"],
-    "zone":["zone","region","area","territory"],
-    "target":["target","sales target","mtd target","monthly target"],
-    "sales":["sales","sale value","sales value","actual sales","net sales","mtd sales","sv"],
-    "cash_sales":["cash","cash sales","cash sv"],
-    "installment_sales":["installment","installments","hp","hire purchase"],
-    "ytd_sales":["ytd sales","year to date sales","ytd sv"],
-    "ytd_target":["ytd target","year to date target","ytd tgt"],
-    "date":["date","transaction date","sales date","invoice date"],
-    "quantity":["qty","quantity","units","units sold"],
-    "category":["category","product category","segment"],
-    "product":["product","item","sku","product name"],
-}
-
-def norm(v):
-    return re.sub(r"[^a-z0-9]+"," ",str(v).lower()).strip()
-
-def infer_mapping(columns):
-    normalized={norm(c):str(c) for c in columns}
-    result={}
-    for canonical,aliases in ALIASES.items():
-        found=None
-        for alias in [canonical.replace("_"," ")]+aliases:
-            if norm(alias) in normalized:
-                found=normalized[norm(alias)]
-                break
-        result[canonical]=found
-    return result
-
 def parse_file(uploaded):
-    raw=uploaded.getvalue()
-    name=uploaded.name.lower()
+    raw = uploaded.getvalue()
+    name = uploaded.name.lower()
     if name.endswith(".csv"):
-        return {"Data":pd.read_csv(io.BytesIO(raw))}
-    xls=pd.ExcelFile(io.BytesIO(raw))
-    return {s:pd.read_excel(io.BytesIO(raw),sheet_name=s) for s in xls.sheet_names}
+        return {"Data": pd.read_csv(io.BytesIO(raw))}
+    xls = pd.ExcelFile(io.BytesIO(raw))
+    return {sheet: pd.read_excel(io.BytesIO(raw), sheet_name=sheet) for sheet in xls.sheet_names}
 
-def to_excel_bytes(sheets):
-    bio=io.BytesIO()
-    with pd.ExcelWriter(bio,engine="openpyxl") as writer:
-        for name,frame in sheets.items():
-            frame.to_excel(writer,index=False,sheet_name=re.sub(r'[\[\]\*\?/\\:]','_',name)[:31] or "Sheet1")
+def clean_name(v: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(v).strip().lower()).strip()
+
+def detect_types(df):
+    date_cols, numeric_cols, categorical_cols, text_cols = [], [], [], []
+    for col in df.columns:
+        s = df[col]
+        # date detection
+        if pd.api.types.is_datetime64_any_dtype(s):
+            date_cols.append(col)
+            continue
+        parsed_dates = pd.to_datetime(s, errors="coerce")
+        if len(s) and parsed_dates.notna().mean() >= 0.8 and s.nunique(dropna=True) > 3:
+            date_cols.append(col)
+            continue
+        # numeric detection
+        numeric = pd.to_numeric(s, errors="coerce")
+        if len(s) and numeric.notna().mean() >= 0.8:
+            numeric_cols.append(col)
+            continue
+        unique = s.nunique(dropna=True)
+        if unique <= 50:
+            categorical_cols.append(col)
+        else:
+            text_cols.append(col)
+    return date_cols, numeric_cols, categorical_cols, text_cols
+
+def likely_column(columns, aliases):
+    normalized = {clean_name(c): c for c in columns}
+    for alias in aliases:
+        if clean_name(alias) in normalized:
+            return normalized[clean_name(alias)]
+    for col in columns:
+        n = clean_name(col)
+        if any(clean_name(a) in n or n in clean_name(a) for a in aliases):
+            return col
+    return None
+
+def money(v):
+    v = float(v)
+    if abs(v) >= 1_000_000_000:
+        return f"{v/1_000_000_000:.2f}B"
+    if abs(v) >= 1_000_000:
+        return f"{v/1_000_000:.2f}M"
+    if abs(v) >= 1_000:
+        return f"{v/1_000:.1f}K"
+    return f"{v:,.0f}"
+
+def to_excel_bytes(df):
+    bio = io.BytesIO()
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Analyzed Data")
     return bio.getvalue()
 
-def numeric_cols(df):
-    return [c for c in df.columns if pd.to_numeric(df[c],errors="coerce").notna().mean()>=.8]
+uploaded = st.file_uploader(
+    "Upload Excel or CSV",
+    type=["xlsx", "xls", "csv"],
+    help="Best results come from structured tables with one header row.",
+)
 
-def safe_formula(df,expr):
-    if "__" in expr or "import" in expr.lower():
-        raise ValueError("Unsafe expression")
-    local={str(c):pd.to_numeric(df[c],errors="coerce") for c in df.columns}
-    local.update({"abs":np.abs,"round":np.round,"sqrt":np.sqrt,"log":np.log,"exp":np.exp})
-    return pd.eval(expr,local_dict=local,engine="python")
-
-if "sheets" not in st.session_state: st.session_state.sheets={}
-if "active_sheet" not in st.session_state: st.session_state.active_sheet=None
-if "mapping" not in st.session_state: st.session_state.mapping={}
-if "filtered" not in st.session_state: st.session_state.filtered=None
-if "last_file" not in st.session_state: st.session_state.last_file=None
-if "templates" not in st.session_state: st.session_state.templates={}
-
-with st.sidebar:
-    st.header("Workspace")
-    uploaded=st.file_uploader("Upload Excel or CSV",type=["xlsx","xls","csv"])
-    if uploaded is not None:
-        key=f"{uploaded.name}_{uploaded.size}"
-        if key!=st.session_state.last_file:
-            try:
-                st.session_state.sheets=parse_file(uploaded)
-                st.session_state.active_sheet=next(iter(st.session_state.sheets))
-                st.session_state.mapping=infer_mapping(st.session_state.sheets[st.session_state.active_sheet].columns)
-                st.session_state.filtered=None
-                st.session_state.last_file=key
-                st.success("File loaded")
-            except Exception as exc:
-                st.error(str(exc))
-    if st.session_state.sheets:
-        names=list(st.session_state.sheets)
-        selected=st.selectbox("Sheet",names,index=names.index(st.session_state.active_sheet))
-        if selected!=st.session_state.active_sheet:
-            st.session_state.active_sheet=selected
-            st.session_state.mapping=infer_mapping(st.session_state.sheets[selected].columns)
-            st.session_state.filtered=None
-            st.rerun()
-        page=st.radio("Go to",[
-            "Data Workspace","Column Mapping","Data Cleaning",
-            "Calculated Columns","Analysis & Pivot","Charts","Templates & Export"
-        ])
-    else:
-        page=None
-
-if not st.session_state.sheets:
-    st.info("Upload a structured Excel or CSV file to begin.")
+if uploaded is None:
+    st.info("Upload a file to generate the analysis automatically.")
     st.stop()
 
-df=st.session_state.sheets[st.session_state.active_sheet].copy()
+try:
+    sheets = parse_file(uploaded)
+except Exception as exc:
+    st.error(f"Could not read the file: {exc}")
+    st.stop()
 
-if page=="Data Workspace":
-    st.header("Data Workspace")
-    a,b,c,d=st.columns(4)
-    a.metric("Rows",f"{len(df):,}")
-    b.metric("Columns",len(df.columns))
-    c.metric("Missing cells",f"{int(df.isna().sum().sum()):,}")
-    d.metric("Duplicates",f"{int(df.duplicated().sum()):,}")
+sheet_name = st.selectbox("Select sheet", list(sheets))
+df = sheets[sheet_name].copy()
 
-    with st.expander("Advanced Excel-style filters"):
-        filtered=df.copy()
-        for i,col in enumerate(df.columns):
-            s=filtered[col]
-            num=pd.to_numeric(s,errors="coerce")
-            if len(s) and num.notna().mean()>=.8 and num.notna().any():
-                lo,hi=float(num.min()),float(num.max())
-                if lo!=hi:
-                    chosen=st.slider(str(col),lo,hi,(lo,hi),key=f"n_{i}_{col}")
-                    filtered=filtered[pd.to_numeric(filtered[col],errors="coerce").between(*chosen)]
-            elif s.nunique(dropna=True)<=50:
-                opts=sorted(s.dropna().astype(str).unique().tolist())
-                selected=st.multiselect(str(col),opts,default=opts,key=f"c_{i}_{col}")
-                filtered=filtered[filtered[col].astype(str).isin(selected)] if selected else filtered.iloc[0:0]
-            else:
-                q=st.text_input(f"{col} contains",key=f"t_{i}_{col}")
-                if q: filtered=filtered[filtered[col].astype(str).str.contains(q,case=False,na=False)]
-    st.session_state.filtered=filtered
+# Remove completely blank rows/columns automatically
+df = df.dropna(how="all").dropna(axis=1, how="all")
+df.columns = [str(c).strip() for c in df.columns]
 
-    gb=GridOptionsBuilder.from_dataframe(filtered)
-    gb.configure_default_column(sortable=True,filter=True,resizable=True,floatingFilter=True)
-    gb.configure_pagination(enabled=True,paginationPageSize=50)
-    gb.configure_side_bar()
-    AgGrid(filtered,gridOptions=gb.build(),height=600,theme="streamlit")
+if df.empty:
+    st.error("The selected sheet has no usable data.")
+    st.stop()
 
-elif page=="Column Mapping":
-    st.header("Column Mapping")
-    columns=["— Not mapped —"]+[str(c) for c in df.columns]
-    mapping=st.session_state.mapping.copy()
-    left,right=st.columns(2)
-    for i,key in enumerate(ALIASES):
-        current=mapping.get(key)
-        index=columns.index(current) if current in columns else 0
-        with (left if i%2==0 else right):
-            choice=st.selectbox(key.replace("_"," ").title(),columns,index=index,key=f"map_{key}")
-            mapping[key]=None if choice=="— Not mapped —" else choice
-    if st.button("Save mapping",type="primary"):
-        st.session_state.mapping=mapping
-        st.success("Mapping saved")
-    st.json(mapping)
+date_cols, numeric_cols, categorical_cols, text_cols = detect_types(df)
 
-elif page=="Data Cleaning":
-    st.header("Data Cleaning")
-    c1,c2,c3=st.columns(3)
-    drop_dupes=c1.checkbox("Remove duplicate rows")
-    drop_blank_rows=c2.checkbox("Remove blank rows")
-    drop_blank_cols=c3.checkbox("Remove blank columns")
-    rename_source=st.selectbox("Rename column",["— None —"]+list(df.columns))
-    rename_target=st.text_input("New name")
-    remove_cols=st.multiselect("Remove columns",list(df.columns))
-    if st.button("Apply cleaning",type="primary"):
-        out=df.copy()
-        if drop_dupes: out=out.drop_duplicates()
-        if drop_blank_rows: out=out.dropna(how="all")
-        if drop_blank_cols: out=out.dropna(axis=1,how="all")
-        if rename_source!="— None —" and rename_target.strip():
-            out=out.rename(columns={rename_source:rename_target.strip()})
-        if remove_cols: out=out.drop(columns=remove_cols,errors="ignore")
-        st.session_state.sheets[st.session_state.active_sheet]=out
-        st.session_state.filtered=None
-        st.rerun()
-    st.dataframe(df.head(100),use_container_width=True)
+# Convert detected columns
+for col in numeric_cols:
+    df[col] = pd.to_numeric(df[col], errors="coerce")
+for col in date_cols:
+    df[col] = pd.to_datetime(df[col], errors="coerce")
 
-elif page=="Calculated Columns":
-    st.header("Calculated Columns")
-    st.caption("Example: Sales / Target * 100")
-    name=st.text_input("New column name")
-    expr=st.text_input("Expression")
-    if st.button("Create column",type="primary"):
-        try:
-            out=df.copy()
-            out[name.strip()]=safe_formula(out,expr.strip())
-            st.session_state.sheets[st.session_state.active_sheet]=out
-            st.session_state.filtered=None
-            st.rerun()
-        except Exception as exc:
-            st.error(str(exc))
-    st.dataframe(df.head(100),use_container_width=True)
+# Identify common business fields
+sales_col = likely_column(df.columns, ["sales", "sale value", "sales value", "net sales", "actual sales", "sv", "revenue"])
+target_col = likely_column(df.columns, ["target", "sales target", "mtd target", "monthly target"])
+cash_col = likely_column(df.columns, ["cash", "cash sales", "cash sale value"])
+installment_col = likely_column(df.columns, ["installment", "installments", "hp", "hire purchase"])
+branch_col = likely_column(df.columns, ["branch", "branch name", "store", "store name", "outlet"])
+zone_col = likely_column(df.columns, ["zone", "region", "area", "territory"])
+qty_col = likely_column(df.columns, ["quantity", "qty", "units", "units sold"])
+date_col = date_cols[0] if date_cols else None
 
-elif page=="Analysis & Pivot":
-    st.header("Analysis & Pivot")
-    group=st.multiselect("Group by",list(df.columns))
-    metric=st.selectbox("Metric",list(df.columns))
-    operation=st.selectbox("Aggregation",["sum","mean","count","min","max","median","nunique"])
-    if st.button("Run analysis",type="primary"):
-        try:
-            if group:
-                result=df.groupby(group,dropna=False)[metric].agg(operation).reset_index(name=f"{operation}_{metric}")
-            else:
-                s=df[metric]
-                value=s.nunique() if operation=="nunique" else getattr(s,operation)()
-                result=pd.DataFrame([{f"{operation}_{metric}":value}])
-            st.session_state.analysis=result
-        except Exception as exc:
-            st.error(str(exc))
-    if "analysis" in st.session_state:
-        st.dataframe(st.session_state.analysis,use_container_width=True)
+# KPI overview
+st.markdown('<div class="section">Automatic Overview</div>', unsafe_allow_html=True)
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Rows", f"{len(df):,}")
+c2.metric("Columns", len(df.columns))
+c3.metric("Missing Cells", f"{int(df.isna().sum().sum()):,}")
+c4.metric("Duplicate Rows", f"{int(df.duplicated().sum()):,}")
 
-elif page=="Charts":
-    st.header("Charts")
-    nums=numeric_cols(df)
-    if not nums:
-        st.warning("No numeric columns detected.")
-    else:
-        c1,c2,c3,c4=st.columns(4)
-        chart=c1.selectbox("Chart",["Bar","Line","Pie","Scatter","Histogram"])
-        x=c2.selectbox("X / category",list(df.columns))
-        y=c3.selectbox("Y / value",nums)
-        agg=c4.selectbox("Aggregation",["sum","mean","count","min","max"])
-        if st.button("Generate chart",type="primary"):
-            try:
-                if chart=="Histogram":
-                    fig=px.histogram(df,x=y)
-                elif chart=="Scatter":
-                    fig=px.scatter(df,x=x,y=y)
-                else:
-                    g=df.groupby(x,dropna=False)[y].agg(agg).reset_index()
-                    fig=px.bar(g,x=x,y=y) if chart=="Bar" else px.line(g,x=x,y=y,markers=True) if chart=="Line" else px.pie(g,names=x,values=y,hole=.45)
-                st.plotly_chart(fig,use_container_width=True)
-            except Exception as exc:
-                st.error(str(exc))
+# Business KPIs when recognized
+business_metrics = []
+if sales_col:
+    business_metrics.append(("Total Sales", money(df[sales_col].sum())))
+if target_col:
+    business_metrics.append(("Total Target", money(df[target_col].sum())))
+if sales_col and target_col and df[target_col].sum():
+    business_metrics.append(("Achievement", f"{df[sales_col].sum()/df[target_col].sum()*100:.1f}%"))
+if cash_col:
+    business_metrics.append(("Cash Sales", money(df[cash_col].sum())))
+if installment_col:
+    business_metrics.append(("Installment Sales", money(df[installment_col].sum())))
+if qty_col:
+    business_metrics.append(("Total Quantity", f"{df[qty_col].sum():,.0f}"))
 
-elif page=="Templates & Export":
-    st.header("Templates & Export")
-    template_name=st.text_input("Template name")
-    if st.button("Save mapping template"):
-        if template_name.strip():
-            st.session_state.templates[template_name.strip()]={"sheet":st.session_state.active_sheet,"mapping":st.session_state.mapping}
-            st.success("Template saved for this session")
-    if st.session_state.templates:
-        selected=st.selectbox("Saved templates",list(st.session_state.templates))
-        st.download_button("Download template",json.dumps(st.session_state.templates[selected],indent=2).encode(),"template.json","application/json")
+if business_metrics:
+    cols = st.columns(min(4, len(business_metrics)))
+    for i, (label, value) in enumerate(business_metrics):
+        cols[i % len(cols)].metric(label, value)
 
-    export_df=st.session_state.filtered if st.session_state.filtered is not None else df
-    c1,c2,c3=st.columns(3)
-    c1.download_button("Download CSV",export_df.to_csv(index=False).encode(),"filtered_data.csv","text/csv",use_container_width=True)
-    c2.download_button("Download Excel",to_excel_bytes({"Filtered Data":export_df}),"filtered_data.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
-    c3.download_button("Download all sheets",to_excel_bytes(st.session_state.sheets),"processed_workbook.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+# Auto insights
+st.markdown('<div class="section">Automatic Findings</div>', unsafe_allow_html=True)
+insights = []
 
-st.divider()
-st.caption("Internal analytics prototype • Structured Excel/CSV only • No VBA or macros")
+if numeric_cols:
+    for col in numeric_cols[:5]:
+        s = df[col].dropna()
+        if len(s):
+            insights.append(f"{col}: average {money(s.mean())}, minimum {money(s.min())}, maximum {money(s.max())}.")
+
+if sales_col and branch_col:
+    branch_sales = df.groupby(branch_col, dropna=False)[sales_col].sum().sort_values(ascending=False)
+    if len(branch_sales):
+        insights.append(f"Highest contributor: {branch_sales.index[0]} with {money(branch_sales.iloc[0])}.")
+        insights.append(f"Lowest contributor: {branch_sales.index[-1]} with {money(branch_sales.iloc[-1])}.")
+
+if sales_col and target_col:
+    temp = df[[sales_col, target_col]].dropna()
+    if len(temp):
+        above = (temp[sales_col] >= temp[target_col]).sum()
+        below = (temp[sales_col] < temp[target_col]).sum()
+        insights.append(f"{above} records are meeting or exceeding target; {below} are below target.")
+
+if cash_col and installment_col:
+    cash = df[cash_col].sum()
+    inst = df[installment_col].sum()
+    total = cash + inst
+    if total:
+        insights.append(f"Cash contributes {cash/total*100:.1f}% while installments contribute {inst/total*100:.1f}%.")
+
+if date_col and sales_col:
+    trend = df.dropna(subset=[date_col]).groupby(df[date_col].dt.to_period("M"))[sales_col].sum()
+    if len(trend) >= 2:
+        change = (trend.iloc[-1] - trend.iloc[-2]) / abs(trend.iloc[-2]) * 100 if trend.iloc[-2] else 0
+        insights.append(f"Latest period changed by {change:.1f}% compared with the previous period.")
+
+if not insights:
+    insights.append("The file was loaded successfully, but no standard sales fields were recognized. Generic profiling and charts are still available.")
+
+for item in insights:
+    st.markdown(f'<div class="insight">{item}</div>', unsafe_allow_html=True)
+
+# Automatic charts
+st.markdown('<div class="section">Automatically Generated Charts</div>', unsafe_allow_html=True)
+
+chart_count = 0
+
+if sales_col and branch_col:
+    chart_df = (
+        df.groupby(branch_col, dropna=False)[sales_col]
+        .sum()
+        .sort_values(ascending=False)
+        .head(15)
+        .reset_index()
+    )
+    fig = px.bar(chart_df, x=branch_col, y=sales_col, title=f"Top {branch_col} by {sales_col}")
+    st.plotly_chart(fig, use_container_width=True)
+    chart_count += 1
+
+if sales_col and target_col and branch_col:
+    chart_df = df.groupby(branch_col, dropna=False)[[sales_col, target_col]].sum().reset_index()
+    fig = px.bar(
+        chart_df,
+        x=branch_col,
+        y=[sales_col, target_col],
+        barmode="group",
+        title="Actual vs Target",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    chart_count += 1
+
+if cash_col and installment_col:
+    mix = pd.DataFrame({
+        "Payment Type": ["Cash", "Installment"],
+        "Value": [df[cash_col].sum(), df[installment_col].sum()],
+    })
+    fig = px.pie(mix, names="Payment Type", values="Value", hole=0.5, title="Cash vs Installment")
+    st.plotly_chart(fig, use_container_width=True)
+    chart_count += 1
+
+if date_col and sales_col:
+    trend = (
+        df.dropna(subset=[date_col])
+        .groupby(df[date_col].dt.date)[sales_col]
+        .sum()
+        .reset_index()
+    )
+    fig = px.line(trend, x=date_col, y=sales_col, markers=True, title="Sales Trend")
+    st.plotly_chart(fig, use_container_width=True)
+    chart_count += 1
+
+if chart_count == 0 and numeric_cols and categorical_cols:
+    cat = categorical_cols[0]
+    num = numeric_cols[0]
+    chart_df = df.groupby(cat, dropna=False)[num].sum().sort_values(ascending=False).head(15).reset_index()
+    fig = px.bar(chart_df, x=cat, y=num, title=f"{num} by {cat}")
+    st.plotly_chart(fig, use_container_width=True)
+
+# Generic numeric summary
+st.markdown('<div class="section">Numeric Summary</div>', unsafe_allow_html=True)
+if numeric_cols:
+    summary = df[numeric_cols].describe().T.reset_index().rename(columns={"index": "Column"})
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+else:
+    st.info("No numeric columns were detected.")
+
+# Missing data analysis
+st.markdown('<div class="section">Data Quality</div>', unsafe_allow_html=True)
+quality = pd.DataFrame({
+    "Column": df.columns,
+    "Missing Values": [int(df[c].isna().sum()) for c in df.columns],
+    "Missing %": [round(df[c].isna().mean() * 100, 2) for c in df.columns],
+    "Unique Values": [int(df[c].nunique(dropna=True)) for c in df.columns],
+    "Detected Type": [
+        "Date" if c in date_cols else "Numeric" if c in numeric_cols else "Category" if c in categorical_cols else "Text"
+        for c in df.columns
+    ],
+})
+st.dataframe(quality, use_container_width=True, hide_index=True)
+
+# Excel-like data table
+st.markdown('<div class="section">Interactive Data Table</div>', unsafe_allow_html=True)
+gb = GridOptionsBuilder.from_dataframe(df)
+gb.configure_default_column(sortable=True, filter=True, resizable=True, floatingFilter=True)
+gb.configure_pagination(enabled=True, paginationPageSize=50)
+gb.configure_side_bar()
+AgGrid(df, gridOptions=gb.build(), height=600, theme="streamlit")
+
+# Downloads
+st.markdown('<div class="section">Download Results</div>', unsafe_allow_html=True)
+c1, c2 = st.columns(2)
+c1.download_button(
+    "Download Cleaned CSV",
+    df.to_csv(index=False).encode("utf-8"),
+    "cleaned_data.csv",
+    "text/csv",
+    use_container_width=True,
+)
+c2.download_button(
+    "Download Cleaned Excel",
+    to_excel_bytes(df),
+    "cleaned_data.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    use_container_width=True,
+)
+
+st.caption("Automatic analysis works best with structured tabular data and recognizable business columns.")
