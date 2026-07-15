@@ -1,66 +1,22 @@
-# Universal Excel Analytics Platform
+# Universal Excel Analytics — Streamlit Edition
 
-A working React + FastAPI prototype for internal Excel/CSV analysis.
+## Features
+- Excel and CSV upload
+- Multiple-sheet support
+- Automatic and manual column mapping
+- Excel-style AG Grid workspace
+- Header filters, sorting, resizing, pagination and side panel
+- Advanced filters
+- Data cleaning
+- Calculated columns
+- Group-by and pivot-style analysis
+- Bar, line, pie, scatter and histogram charts
+- CSV/Excel export
+- Reusable mapping templates
 
-## Included
+## Run locally
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
 
-- Excel/CSV upload
-- Multiple-sheet Excel detection
-- Data preview
-- Automatic column recognition
-- Manual column mapping
-- Spreadsheet-style data grid
-- Sorting, floating filters, resizing and pagination
-- Advanced filter builder
-- Calculated numeric columns
-- Group-by analysis
-- Sum, average, count, min, max, median and distinct count
-- Bar, line and pie charts
-- CSV and Excel export
-
-## Supported files
-
-- `.xlsx`
-- `.xls`
-- `.csv`
-
-The file must contain structured tabular data. The system does not execute Excel macros or interpret images/unstructured documents.
-
-## Run the backend
-
-```bash
-cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-```
-
-Backend URL: `http://localhost:8000`
-
-## Run the frontend
-
-Install Node.js first, then:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend URL: `http://localhost:5173`
-
-## Calculated-column examples
-
-```text
-Sales - Cost
-Sales / Target * 100
-Cash + Installment
-round(Sales / 1000000, 2)
-```
-
-Column names with spaces may need to be renamed or mapped to simpler names before formulas are used.
-
-## Important prototype note
-
-Sessions are stored in backend memory. Restarting the backend clears uploaded data. For shared departmental deployment, add PostgreSQL/object storage and authentication.
+## Deploy
+Upload this folder to GitHub, then deploy `app.py` on Streamlit Community Cloud.
